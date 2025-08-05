@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF画像化アプリ（ZIP一括ダウンロード）</title>
+    <!-- Tailwind CSSを読み込み -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- PDF.jsライブラリを読み込み -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+    <!-- JSZipライブラリを読み込み（ZIPファイル作成用） -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        /* フォント設定 */
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* ローディングスピナーのスタイル */
+        .loader {
+            border: 5px solid #f3f3f3;
+            border-top: 5px solid #3498db;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+</head>
+<body class="bg-gray-100 text-gray-800" style="font-family: 'Noto Sans JP', sans-serif;">
+
+    <div class="container mx-auto p-4 sm:p-8">
+        <header class="text-center mb-8">
+            <h1 class="text-3xl sm:text-4xl font-bold text-gray-700">PDF画像化アプリ</h1>
+            <p class="text-gray-500 mt-2">複数のPDFファイルを選択すると、ページごとに画像へ変換します（2ページ目は除外）。</p>
+        </header>
+
+        <!-- 操作エリア -->
+        <div class="max-w-xl mx-auto bg-white p-6 rounded-xl shadow-md space-y-4">
+            <div>
+                <label for="pdf-upload" class="w-full inline-block text-center px-6 py-3 bg-blue-500 text-white font-bold rounded-lg cursor-pointer hover:bg-blue-600 transition-colors duration-300">
+                    PDFファイルを選択
+                </label>
+                <input type="file" id="pdf-upload" multiple accept=".pdf" class="hidden">
+                <p id="file-info" class="text-center text-sm text-gray-500 mt-3">まだファイルが選択されていません</p>
+            </div>
+            <div>
+                <!-- ZIPダウンロードボタン（初期状態では非表示） -->
+                <button id="download-zip-btn" class="hidden w-full px-6 py-3 bg-green-500 text-white font-bold rounded-lg hover:bg-green-600 transition-colors duration-300 disabled:bg-gray-400">
+                    すべてをZIPでダウンロード
+                </button>
+            </div>
+        </div>
+
+        <!-- ローディング表示 -->
+        <div id="loader-container" class="text-center my-8 hidden">
+            <div class="loader inline-block"></div>
+            <p class="text-gray-600 mt-2">画像を生成中です... ファイルサイズによって時間がかかる場合があります。</p>
+        </div>
+
+        <!-- 画像出力エリア -->
+        <div id="image-output" class="mt-10 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+            <!-- 生成された画像がここに追加されます -->
+        </div>
+    </div>
+
+    <script>
+        // PDF.jsのワーカーのパスを設定
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+
+        const pdfUpload = document.getElementById('pdf-upload');
+        const imageOutput = document.getElementById('image-output');
+        const loaderContainer = document.getElementById('loader-container');
+        const fileInfo = document.getElementById('file-info');
+        const downloadZipBtn = document.getElementById('download-zip-btn');
+
+        // ZIPファイルに含める画像データを保持する配列
+        let imagesForZip = [];
+
+        // ファイル選択時のイベント
+        pdfUpload.addEventListener('change', async (event) => {
+            const files = event.target.files;
+            if (files.length === 0) {
+                fileInfo.textContent = 'まだファイルが選択されていません';
+                return;
+            }
+
+            // 初期化処理
+            imageOutput.innerHTML = '';
+            imagesForZip = [];
+            downloadZipBtn.classList.add('hidden'); // ダウンロードボタンを隠す
+            fileInfo.textContent = `${files.length}個のファイルを選択しました。`;
+            
+            // ローディング表示を開始
+            loaderContainer.classList.remove('hidden');
+
+            // すべてのファイルを処理
+            for (const file of files) {
+                try {
+                    await processPdfFile(file);
+                } catch (error) {
+                    console.error(`ファイル ${file.name} の処理中にエラーが発生しました:`, error);
+                    const errorCard = document.createElement('div');
+                    errorCard.className = 'bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg';
+                    errorCard.innerHTML = `<strong class="font-bold">${file.name}</strong><span class="block sm:inline"> の処理に失敗しました。</span>`;
+                    imageOutput.appendChild(errorCard);
+                }
+            }
+
+            // ローディング表示を終了
+            loaderContainer.classList.add('hidden');
+
+            // 画像が1枚以上生成されたらダウンロードボタンを表示
+            if (imagesForZip.length > 0) {
+                downloadZipBtn.classList.remove('hidden');
+            }
+        });
+
+        // ZIPダウンロードボタンのイベント
+        downloadZipBtn.addEventListener('click', async () => {
+            if (imagesForZip.length === 0) return;
+
+            // ボタンを無効化し、テキストを変更して処理中であることを示す
+            downloadZipBtn.disabled = true;
+            downloadZipBtn.textContent = 'ZIPファイルを作成中...';
+
+            const zip = new JSZip();
+            
+            // 配列内の各画像データをZIPに追加
+            for (const imgData of imagesForZip) {
+                // Base64データからプレフィックス（data:image/png;base64,）を削除
+                const base64Data = imgData.url.split(',')[1];
+                zip.file(imgData.name, base64Data, { base64: true });
+            }
+
+            // ZIPファイルを生成
+            const zipBlob = await zip.generateAsync({ type: 'blob' });
+
+            // 生成したZIPファイルをダウンロード
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(zipBlob);
+            link.download = 'pdf_images.zip';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(link.href); // メモリを解放
+
+            // ボタンの状態を元に戻す
+            downloadZipBtn.disabled = false;
+            downloadZipBtn.textContent = 'すべてをZIPでダウンロード';
+        });
+
+        /**
+         * PDFファイルを処理し、ページごとに画像化する関数
+         * @param {File} file - 処理対象のPDFファイル
+         */
+        async function processPdfFile(file) {
+            const buffer = await file.arrayBuffer();
+            const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+
+            for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+                // ★★★ 2ページ目はスキップする ★★★
+                if (pageNum === 2) {
+                    continue;
+                }
+
+                const page = await pdf.getPage(pageNum);
+                const scale = 1.5;
+                const viewport = page.getViewport({ scale });
+
+                const canvas = document.createElement('canvas');
+                const context = canvas.getContext('2d');
+                canvas.height = viewport.height;
+                canvas.width = viewport.width;
+
+                await page.render({ canvasContext: context, viewport }).promise;
+
+                const imageUrl = canvas.toDataURL('image/png');
+                
+                // ファイル名から拡張子(.pdf)を除去
+                const cleanFileName = file.name.replace(/\.pdf$/i, '');
+                const outputFileName = `${cleanFileName}_page_${pageNum}.png`;
+
+                // ZIP配信用配列に画像データを追加
+                imagesForZip.push({ name: outputFileName, url: imageUrl });
+                
+                // 画面に画像を表示
+                displayImage(imageUrl, file.name, pageNum);
+            }
+        }
+
+        /**
+         * 生成された画像を画面に表示する関数
+         * @param {string} imageUrl - 画像のデータURL
+         * @param {string} fileName - 元のファイル名
+         * @param {number} pageNum - ページ番号
+         */
+        function displayImage(imageUrl, fileName, pageNum) {
+            const card = document.createElement('div');
+            card.className = 'bg-white rounded-lg shadow-md overflow-hidden transform hover:-translate-y-1 transition-transform duration-300';
+
+            const img = document.createElement('img');
+            img.src = imageUrl;
+            img.alt = `${fileName} - ${pageNum}ページ目`;
+            img.className = 'w-full h-auto';
+            
+            const infoDiv = document.createElement('div');
+            infoDiv.className = 'p-4 text-center';
+            
+            const fileNameP = document.createElement('p');
+            fileNameP.className = 'font-bold text-sm truncate';
+            fileNameP.textContent = fileName;
+            
+            const pageNumP = document.createElement('p');
+            pageNumP.className = 'text-xs text-gray-500';
+            pageNumP.textContent = `ページ: ${pageNum}`;
+
+            infoDiv.appendChild(fileNameP);
+            infoDiv.appendChild(pageNumP);
+            card.appendChild(img);
+            card.appendChild(infoDiv);
+
+            imageOutput.appendChild(card);
+        }
+    </script>
+</body>
+</html>
